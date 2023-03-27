@@ -1,2 +1,7 @@
 # Pytorch_ResNet_ImageNet
-Image classification based on ResNet, using Pytorch：使用Pytorch训练ResNet实现ImageNet图像分类
+
+切换语言：[[简体中文](./assets/README-中文.md)]
+
+> Forked from https://github.com/pytorch/examples/tree/main/imagenet
+
+![ImageNet](./assets/imagenet_banner.jpeg)
