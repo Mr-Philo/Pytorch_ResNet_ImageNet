@@ -77,6 +77,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
+parser.add_argument('--enable_wandb', action='store_true', help="enable wandb logging")
+parser.add_argument('--output_dir', type=str, default='output', help="output dir")
 
 best_acc1 = 0
 
@@ -122,6 +124,13 @@ def main():
 
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
+    if args.enable_wandb:
+        try:
+            import wandb
+            wandb.init(project="pytorch_imagenet")
+        except ImportError:
+            raise ImportError("Please install wandb to enable wandb logging")
+        
     args.gpu = gpu
 
     if args.gpu is not None:
@@ -225,7 +234,8 @@ def main_worker(gpu, ngpus_per_node, args):
     # Data loading code
     if args.dummy:
         print("=> Dummy data is used!")
-        train_dataset = datasets.FakeData(1281167, (3, 224, 224), 1000, transforms.ToTensor())
+        # train_dataset = datasets.FakeData(1281167, (3, 224, 224), 1000, transforms.ToTensor())
+        train_dataset = datasets.FakeData(128116, (3, 224, 224), 1000, transforms.ToTensor())
         val_dataset = datasets.FakeData(50000, (3, 224, 224), 1000, transforms.ToTensor())
     else:
         traindir = os.path.join(args.data, 'train')
@@ -275,10 +285,24 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, args)
+        loss, top1, top5 = train(train_loader, model, criterion, optimizer, epoch, device, args)
+        # log wandb when an epoch is finished
+        if args.enable_wandb:
+            wandb.log({
+                "train/loss": loss,
+                "train/acc1": top1,
+                "train/acc5": top5,
+            })
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        loss, acc1, top5 = validate(val_loader, model, criterion, args)
+        # log wandb when eval is finished
+        if args.enable_wandb:
+            wandb.log({
+                "val/loss": loss,
+                "val/acc1": acc1,
+                "val/acc5": top5,
+            })
         
         scheduler.step()
         
@@ -295,7 +319,9 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-            }, is_best)
+            }, is_best, save_dir=args.output_dir)
+            
+    print("Training finished")
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -342,6 +368,8 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+    
+    return losses.avg, top1.avg, top5.avg
 
 
 def validate(val_loader, model, criterion, args):
@@ -403,13 +431,15 @@ def validate(val_loader, model, criterion, args):
 
     progress.display_summary()
 
-    return top1.avg
+    return losses.avg, top1.avg, top5.avg
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
+def save_checkpoint(state, is_best, save_dir='output', filename='checkpoint.pth.tar'):
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, filename)
+    torch.save(state, save_path)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(save_path, os.path.join(save_dir, 'model_best.pth.tar'))
 
 class Summary(Enum):
     NONE = 0
