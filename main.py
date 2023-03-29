@@ -21,6 +21,13 @@ import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
+try:
+    from timm.data import TimmDatasetTar
+except ImportError:
+    # for higher version of timm
+    from timm.data import ImageDataset as TimmDatasetTar
+    
+
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -124,12 +131,6 @@ def main():
 
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
-    if args.enable_wandb:
-        try:
-            import wandb
-            wandb.init(project="pytorch_imagenet")
-        except ImportError:
-            raise ImportError("Please install wandb to enable wandb logging")
         
     args.gpu = gpu
 
@@ -145,6 +146,17 @@ def main_worker(gpu, ngpus_per_node, args):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
+        
+    # create log
+    # only enable wandb log in main process
+    if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
+        if args.enable_wandb:
+            try:
+                import wandb
+                wandb.init(project="pytorch_imagenet")
+            except ImportError:
+                raise ImportError("Please install wandb to enable wandb logging")
+            
     # create model
     if args.pretrained:
         print("=> using pre-trained model '{}'".format(args.arch))
@@ -238,28 +250,51 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset = datasets.FakeData(128116, (3, 224, 224), 1000, transforms.ToTensor())
         val_dataset = datasets.FakeData(50000, (3, 224, 224), 1000, transforms.ToTensor())
     else:
-        traindir = os.path.join(args.data, 'train')
-        valdir = os.path.join(args.data, 'val')
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+        if os.path.exists(os.path.join(args.data, 'train')):
+            traindir = os.path.join(args.data, 'train')
+            valdir = os.path.join(args.data, 'val')
+        
+            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
 
-        train_dataset = datasets.ImageFolder(
-            traindir,
-            transforms.Compose([
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                normalize,
-            ]))
+            train_dataset = datasets.ImageFolder(
+                traindir,
+                transforms.Compose([
+                    transforms.RandomResizedCrop(224),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    normalize,
+                ]))
 
-        val_dataset = datasets.ImageFolder(
-            valdir,
-            transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                normalize,
-            ]))
+            val_dataset = datasets.ImageFolder(
+                valdir,
+                transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    normalize,
+                ]))
+        else:
+            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                        std=[0.229, 0.224, 0.225])
+            dataset_tar_t = TimmDatasetTar
+            
+            train_dataset = dataset_tar_t(
+                os.path.join(args.data, 'train.tar'), 
+                transform = transforms.Compose([
+                    transforms.RandomResizedCrop(224),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    normalize,
+                ]))
+            val_dataset = dataset_tar_t(
+                os.path.join(args.data, 'val.tar'), 
+                transform = transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    normalize,
+                ]))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -285,24 +320,10 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        loss, top1, top5 = train(train_loader, model, criterion, optimizer, epoch, device, args)
-        # log wandb when an epoch is finished
-        if args.enable_wandb:
-            wandb.log({
-                "train/loss": loss,
-                "train/acc1": top1,
-                "train/acc5": top5,
-            })
+        train_loss, train_acc1, train_acc5 = train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        loss, acc1, top5 = validate(val_loader, model, criterion, args)
-        # log wandb when eval is finished
-        if args.enable_wandb:
-            wandb.log({
-                "val/loss": loss,
-                "val/acc1": acc1,
-                "val/acc5": top5,
-            })
+        valid_loss, acc1, valid_acc5 = validate(val_loader, model, criterion, args)
         
         scheduler.step()
         
@@ -310,8 +331,17 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
+            # only enable wandb log in main process
+            if args.enable_wandb:
+                wandb.log({
+                    "train/loss": train_loss,
+                    "train/acc1": train_acc1,
+                    "train/acc5": train_acc5,
+                    "val/loss": valid_loss,
+                    "val/acc1": acc1,
+                    "val/acc5": valid_acc5,
+                })
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
